@@ -8,3 +8,4 @@ from allennlp_models.structured_prediction.dataset_readers.srl import SrlReader
 from allennlp_models.structured_prediction.dataset_readers.universal_dependencies import (
     UniversalDependenciesDatasetReader,
 )
+from allennlp_models.structured_prediction.dataset_readers.srl_self_training import SrlSelfTrainingReader

@@ -20,8 +20,8 @@ from allennlp_models.structured_prediction.metrics.srl_eval_scorer import (
 )
 
 
-@Model.register("srl_bert")
-class SrlBert(Model):
+@Model.register("srl_self_training")
+class SrlSelfTraining(Model):
     """
 
     A BERT based model [Simple BERT Models for Relation Extraction and Semantic Role Labeling (Shi et al, 2019)]
@@ -104,6 +104,8 @@ class SrlBert(Model):
         verb_indicator: torch.Tensor,
         metadata: List[Any],
         tags: torch.LongTensor = None,
+        self_training: bool = False,
+        weighted_self_training: bool = False
     ):
 
         """
@@ -165,47 +167,61 @@ class SrlBert(Model):
         output_dict["wordpiece_offsets"] = list(offsets)
 
         if tags is not None:
-            loss = sequence_cross_entropy_with_logits(
-                logits, tags, mask, label_smoothing=self._label_smoothing
-            )
-            if not self.ignore_span_metric and self.span_metric is not None and not self.training:
-                batch_verb_indices = [
-                    example_metadata["verb_index"] for example_metadata in metadata
-                ]
-                batch_sentences = [example_metadata["words"] for example_metadata in metadata]
-                # Get the BIO tags from make_output_human_readable()
-                # TODO (nfliu): This is kind of a hack, consider splitting out part
-                # of make_output_human_readable() to a separate function.
-                batch_bio_predicted_tags = self.make_output_human_readable(output_dict).pop("tags")
-                from allennlp_models.structured_prediction.models.srl import (
-                    convert_bio_tags_to_conll_format,
+            if not self_training:
+                loss = sequence_cross_entropy_with_logits(
+                    logits, tags, mask, label_smoothing=self._label_smoothing
                 )
+                if not self.ignore_span_metric and self.span_metric is not None and not self.training:
+                    batch_verb_indices = [
+                        example_metadata["verb_index"] for example_metadata in metadata
+                    ]
+                    batch_sentences = [example_metadata["words"] for example_metadata in metadata]
+                    # Get the BIO tags from make_output_human_readable()
+                    # TODO (nfliu): This is kind of a hack, consider splitting out part
+                    # of make_output_human_readable() to a separate function.
+                    batch_bio_predicted_tags = self.make_output_human_readable(output_dict).pop("tags")
+                    from allennlp_models.structured_prediction.models.srl import (
+                        convert_bio_tags_to_conll_format,
+                    )
 
-                batch_conll_predicted_tags = [
-                    convert_bio_tags_to_conll_format(tags) for tags in batch_bio_predicted_tags
-                ]
-                batch_bio_gold_tags = [
-                    example_metadata["gold_tags"] for example_metadata in metadata
-                ]
-                batch_conll_gold_tags = [
-                    convert_bio_tags_to_conll_format(tags) for tags in batch_bio_gold_tags
-                ]
-                self.span_metric(
-                    batch_verb_indices,
-                    batch_sentences,
-                    batch_conll_predicted_tags,
-                    batch_conll_gold_tags,
-                )
+                    batch_conll_predicted_tags = [
+                        convert_bio_tags_to_conll_format(tags) for tags in batch_bio_predicted_tags
+                    ]
+                    batch_bio_gold_tags = [
+                        example_metadata["gold_tags"] for example_metadata in metadata
+                    ]
+                    batch_conll_gold_tags = [
+                        convert_bio_tags_to_conll_format(tags) for tags in batch_bio_gold_tags
+                    ]
+                    self.span_metric(
+                        batch_verb_indices,
+                        batch_sentences,
+                        batch_conll_predicted_tags,
+                        batch_conll_gold_tags,
+                    )
+            else:
+                # print('tags: ',tags)
+                # print('mask length : ',mask.sum(-1))
+                # print('tokens: ', util.get_token_ids_from_text_field_tensors(tokens))
+                batch_parse_spans = [example_metadata["parse_spans"] for example_metadata in metadata]
+                batch_bio_predicted_tags, pred_tags = self.get_pred_tags(output_dict)
+                if weighted_self_training:
+                    batch_pred_srl_spans = self.bio2spans(batch_bio_predicted_tags)
+                    scores = self.measure_disagreement(batch_parse_spans,batch_pred_srl_spans)
+                    scores = scores.to(device=output_dict['logits'].device)
+                    batch_loss = sequence_cross_entropy_with_logits(
+                        logits, pred_tags, mask, average=None, label_smoothing=self._label_smoothing
+                    )
+                    scaled_loss = scores * batch_loss * -1
+                    loss = torch.mean(scaled_loss)
+                    # print('weighted self-training loss',loss)
+                else:
+                    loss = sequence_cross_entropy_with_logits(
+                        logits, pred_tags, mask, label_smoothing=self._label_smoothing
+                    )
+                    # print('self-training loss',loss)
+
             output_dict["loss"] = loss
-            print("begin:")
-            print(output_dict['words'][0])
-            print(output_dict["mask"][0])
-            print(output_dict['wordpiece_tags'][0])
-            print(metadata[0]['wordpieces'])
-            print(output_dict['wordpiece_offsets'][0])
-            print(tags[0])
-            print(batch_bio_predicted_tags[0])
-            print(batch_bio_gold_tags[0])
         return output_dict
 
     @overrides
@@ -320,5 +336,119 @@ class SrlBert(Model):
                 start_transitions[i] = float("-inf")
 
         return start_transitions
+
+    def get_pred_tags(self, output_dict: Dict[str, torch.Tensor]):
+        all_predictions = output_dict["class_probabilities"] # batch, sequence, num_tags
+        pred_tags = torch.zeros_like(output_dict["logits"][:,:,0], device=output_dict["logits"].device, dtype=torch.long)
+
+        sequence_lengths = get_lengths_from_binary_sequence_mask(output_dict["mask"]).data.tolist()
+
+        if all_predictions.dim() == 3:
+            predictions_list = [
+                all_predictions[i].detach().cpu() for i in range(all_predictions.size(0))
+            ]
+        else:
+            predictions_list = [all_predictions]
+        wordpiece_tags = []
+        word_tags = []
+        transition_matrix = self.get_viterbi_pairwise_potentials()
+        start_transitions = self.get_start_transitions()
+        # **************** Different ********************
+        # We add in the offsets here so we can compute the un-wordpieced tags.
+        count = 0
+        for predictions, length, offsets in zip(
+            predictions_list, sequence_lengths, output_dict["wordpiece_offsets"]
+        ):
+            max_likelihood_sequence, _ = viterbi_decode(
+                predictions[:length], transition_matrix, allowed_start_transitions=start_transitions
+            )
+            pred_tags[count,:length] = torch.tensor(max_likelihood_sequence)
+            count+=1
+            tags = [
+                self.vocab.get_token_from_index(x, namespace="labels")
+                for x in max_likelihood_sequence
+            ]
+
+            wordpiece_tags.append(tags)
+            # print('tags length',len(tags))
+            word_tags.append([tags[i] for i in offsets])
+        return word_tags, pred_tags
+    
+    def bio2spans(self, batch_bio_predicted_tags):
+        def tags2spans(tags):
+            # print(tags)
+            spans = []
+            start = 0
+            # print(tags)
+            if tags[0] == "O":
+                prev_tag = tags[0]
+            else:
+                if not tags[0][:2] == "B-":
+                    print("tags sequence is not correct")
+                    return []
+                prev_tag = tags[0][2:]
+            for pos in range(1,len(tags)):
+                curr_tag = tags[pos]
+                if curr_tag == "O":
+                    if not prev_tag == "O":
+                        spans.append([start,pos-start,prev_tag])
+                        prev_tag = "O"
+                        # start = pos
+                elif curr_tag[:2] == "I-":
+                    if not prev_tag == curr_tag[2:]:
+                        # print(tags)
+                        # print(prev_tag, curr_tag, pos)
+                        print("tags sequence is not correct")
+                        return []
+                elif curr_tag[:2] == "B-":
+                    if prev_tag == "O":
+                        prev_tag = curr_tag[2:]
+                        start = pos
+                    else:
+                        spans.append([start,pos-start,prev_tag])
+                        prev_tag = curr_tag[2:]
+                        start = pos
+            curr_tag = tags[-1]
+            if not curr_tag == "O":
+                spans.append([start,len(tags)-start,prev_tag])
+            # print(spans)
+            return spans
+
+        batch_spans = []
+        for bio_predicted_tags in batch_bio_predicted_tags:
+            spans = tags2spans(bio_predicted_tags)
+            batch_spans.append(spans)
+        
+        return batch_spans
+
+    def measure_disagreement(self, batch_parse_spans, batch_pred_srl_spans):
+        batch_size = len(batch_parse_spans)
+        scores = torch.zeros(batch_size)
+        for i in range(batch_size):
+            parse_spans = batch_parse_spans[i]
+            pred_spans = batch_pred_srl_spans[i]
+            if parse_spans is not None:
+                parse_spans = set([(span[0],span[1]) for span in parse_spans ])
+                # print("gold: ",parse_spans)
+            else:
+                scores[i] = 0.0
+                continue
+            pred_spans = set([(span[0],span[1]) for span in pred_spans if not span[2]=='V'])
+            # print('pred: ',pred_spans)
+            # print('parse_spans: ',parse_spans)
+            # print('pred_spans: ',pred_spans)
+            if len(pred_spans) > 0:
+                _score = 2 * len(pred_spans - pred_spans.intersection(parse_spans))/len(pred_spans) - 1.0
+            else:
+                _score = 0.0
+            # print('intersection: ',pred_spans.intersection(parse_spans))
+            # print(_score)
+            scores[i] = _score
+            # print(scores[i])
+        
+        return scores
+            
+
+
 
     default_predictor = "semantic_role_labeling"

@@ -1,6 +1,9 @@
 import logging
 from typing import Dict, List, Iterable, Tuple, Any
 
+import torch
+from nltk.tree import Tree
+
 from overrides import overrides
 from transformers.models.bert.tokenization_bert import BertTokenizer
 
@@ -91,9 +94,28 @@ def _convert_verb_indices_to_wordpiece_indices(verb_indices: List[int], offsets:
     # Add 0 indicators for cls and sep tokens.
     return [0] + new_verb_indices + [0]
 
+def _tree_to_spans(tree):
+    spans = []
 
-@DatasetReader.register("srl")
-class SrlReader(DatasetReader):
+    def helper(tr, pos):
+        if len(tr)==1 and isinstance(tr[0], (int, str)):
+            size = 1
+            return size
+        size = 0
+        for x in tr:
+            xpos = pos + size
+            xsize = helper(x, xpos)
+            size += xsize
+        spans.append((pos, size, tr.label()))
+        return size
+
+    helper(tree, 0)
+
+    return spans
+
+
+@DatasetReader.register("srl_self_training")
+class SrlSelfTrainingReader(DatasetReader):
     """
     This DatasetReader is designed to read in the English OntoNotes v5.0 data
     for semantic role labelling. It returns a dataset of instances with the
@@ -206,8 +228,8 @@ class SrlReader(DatasetReader):
     @overrides
     def _read(self, file_path: str):
         # if `file_path` is a URL, redirect to the cache
-        file_path = cached_path(file_path)
-        ontonotes_reader = Ontonotes()
+        # file_path = cached_path(file_path)
+        # ontonotes_reader = Ontonotes()
         logger.info("Reading SRL instances from dataset files at: %s", file_path)
         if self._domain_identifier is not None:
             logger.info(
@@ -215,19 +237,22 @@ class SrlReader(DatasetReader):
                 self._domain_identifier,
             )
 
-        for sentence in self._ontonotes_subset(
-            ontonotes_reader, file_path, self._domain_identifier
-        ):
+        instances = torch.load(file_path)
+        for sentence in instances:
             tokens = [Token(t) for t in sentence.words]
+            if not sentence.parse_tree is None:
+                parse_spans = _tree_to_spans(sentence.parse_tree)
+            else:
+                parse_spans = None
             if not sentence.srl_frames:
                 # Sentence contains no predicates.
                 tags = ["O" for _ in tokens]
                 verb_label = [0 for _ in tokens]
-                yield self.text_to_instance(tokens, verb_label, tags)
+                yield self.text_to_instance(tokens, verb_label, tags, parse_spans)
             else:
                 for (_, tags) in sentence.srl_frames:
                     verb_indicator = [1 if label[-2:] == "-V" else 0 for label in tags]
-                    yield self.text_to_instance(tokens, verb_indicator, tags)
+                    yield self.text_to_instance(tokens, verb_indicator, tags, parse_spans)
 
     @staticmethod
     def _ontonotes_subset(
@@ -243,8 +268,8 @@ class SrlReader(DatasetReader):
                 yield from ontonotes_reader.sentence_iterator(conll_file)
 
     def text_to_instance(  # type: ignore
-        self, tokens: List[Token], verb_label: List[int], tags: List[str] = None
-    ) -> Instance:
+        self, tokens: List[Token], verb_label: List[int], tags: List[str] = None,
+    parse_spans: List[Tuple] = None) -> Instance:
         """
         We take `pre-tokenized` input here, along with a verb label.  The verb label should be a
         one-hot binary vector, the same length as the tokens, indicating the position of the verb
@@ -258,7 +283,6 @@ class SrlReader(DatasetReader):
             )
             new_verbs = _convert_verb_indices_to_wordpiece_indices(verb_label, offsets)
             metadata_dict["offsets"] = start_offsets
-            metadata_dict["wordpieces"] = wordpieces
             # In order to override the indexing mechanism, we need to set the `text_id`
             # attribute directly. This causes the indexing to use this id.
             text_field = TextField(
@@ -285,6 +309,7 @@ class SrlReader(DatasetReader):
         metadata_dict["words"] = [x.text for x in tokens]
         metadata_dict["verb"] = verb
         metadata_dict["verb_index"] = verb_index
+        metadata_dict["parse_spans"] = parse_spans
 
         if tags:
             if self.bert_tokenizer is not None:

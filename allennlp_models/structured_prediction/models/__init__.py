@@ -5,3 +5,4 @@ from allennlp_models.structured_prediction.models.constituency_parser import Spa
 from allennlp_models.structured_prediction.models.graph_parser import GraphParser
 from allennlp_models.structured_prediction.models.srl import SemanticRoleLabeler
 from allennlp_models.structured_prediction.models.srl_bert import SrlBert
+from allennlp_models.structured_prediction.models.srl_self_training import SrlSelfTraining
