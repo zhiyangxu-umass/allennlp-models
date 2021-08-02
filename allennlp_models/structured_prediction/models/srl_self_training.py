@@ -172,6 +172,16 @@ class SrlSelfTraining(Model):
                     logits, tags, mask, label_smoothing=self._label_smoothing
                 )
                 if not self.ignore_span_metric and self.span_metric is not None and not self.training:
+                    #------------- get disagreement scores --------------#
+                    if "parse_spans" in metadata[0]:
+                        batch_parse_spans = [example_metadata["parse_spans"] for example_metadata in metadata]
+                        batch_bio_predicted_tags, pred_tags = self.get_pred_tags(output_dict)
+                        batch_pred_srl_spans = self.bio2spans(batch_bio_predicted_tags,metadata)
+                        scores, num_instance = self.measure_disagreement(batch_parse_spans,batch_pred_srl_spans)
+                        output_dict["disagr_score"] = torch.mean(scores)
+                    #------------------------------------------------#
+                    output_dict["parse_spans"] = [example_metadata["parse_spans"] for example_metadata in metadata]
+                    output_dict["gold_tags"] = [example_metadata["gold_tags"] for example_metadata in metadata]
                     batch_verb_indices = [
                         example_metadata["verb_index"] for example_metadata in metadata
                     ]
@@ -206,14 +216,19 @@ class SrlSelfTraining(Model):
                 batch_parse_spans = [example_metadata["parse_spans"] for example_metadata in metadata]
                 batch_bio_predicted_tags, pred_tags = self.get_pred_tags(output_dict)
                 if weighted_self_training:
-                    batch_pred_srl_spans = self.bio2spans(batch_bio_predicted_tags)
-                    scores = self.measure_disagreement(batch_parse_spans,batch_pred_srl_spans)
+                    batch_pred_srl_spans = self.bio2spans(batch_bio_predicted_tags,metadata)
+                    scores, num_instance = self.measure_disagreement(batch_parse_spans,batch_pred_srl_spans)
                     scores = scores.to(device=output_dict['logits'].device)
                     batch_loss = sequence_cross_entropy_with_logits(
                         logits, pred_tags, mask, average=None, label_smoothing=self._label_smoothing
                     )
                     scaled_loss = scores * batch_loss * -1
-                    loss = torch.mean(scaled_loss)
+                    if num_instance >0:
+                        loss = torch.sum(scaled_loss) / num_instance
+                    else:
+                        loss = torch.mean(scaled_loss)
+                    # pass batch disagreement scores
+                    output_dict["disagr_score"] = torch.mean(scores)
                     # print('weighted self-training loss',loss)
                 else:
                     loss = sequence_cross_entropy_with_logits(
@@ -374,7 +389,7 @@ class SrlSelfTraining(Model):
             word_tags.append([tags[i] for i in offsets])
         return word_tags, pred_tags
     
-    def bio2spans(self, batch_bio_predicted_tags):
+    def bio2spans(self, batch_bio_predicted_tags,metadata):
         def tags2spans(tags):
             # print(tags)
             spans = []
@@ -385,7 +400,7 @@ class SrlSelfTraining(Model):
             else:
                 if not tags[0][:2] == "B-":
                     print("tags sequence is not correct")
-                    return []
+                    return None
                 prev_tag = tags[0][2:]
             for pos in range(1,len(tags)):
                 curr_tag = tags[pos]
@@ -399,7 +414,7 @@ class SrlSelfTraining(Model):
                         # print(tags)
                         # print(prev_tag, curr_tag, pos)
                         print("tags sequence is not correct")
-                        return []
+                        return None
                 elif curr_tag[:2] == "B-":
                     if prev_tag == "O":
                         prev_tag = curr_tag[2:]
@@ -415,8 +430,11 @@ class SrlSelfTraining(Model):
             return spans
 
         batch_spans = []
-        for bio_predicted_tags in batch_bio_predicted_tags:
+        for bio_predicted_tags, sample_metadata in zip(batch_bio_predicted_tags,metadata):
             spans = tags2spans(bio_predicted_tags)
+            # print(bio_predicted_tags)
+            # print(sample_metadata['gold_tags'])
+            # print(spans)
             batch_spans.append(spans)
         
         return batch_spans
@@ -424,9 +442,14 @@ class SrlSelfTraining(Model):
     def measure_disagreement(self, batch_parse_spans, batch_pred_srl_spans):
         batch_size = len(batch_parse_spans)
         scores = torch.zeros(batch_size)
+        num_instance = 0
         for i in range(batch_size):
             parse_spans = batch_parse_spans[i]
             pred_spans = batch_pred_srl_spans[i]
+            if pred_spans is None:
+                scores[i] = 1.0
+                num_instance += 1
+                continue
             if parse_spans is not None:
                 parse_spans = set([(span[0],span[1]) for span in parse_spans ])
                 # print("gold: ",parse_spans)
@@ -434,11 +457,13 @@ class SrlSelfTraining(Model):
                 scores[i] = 0.0
                 continue
             pred_spans = set([(span[0],span[1]) for span in pred_spans if not span[2]=='V'])
+            # pred_spans = set([(span[0],span[1]) for span in pred_spans if span[1]>1])
             # print('pred: ',pred_spans)
             # print('parse_spans: ',parse_spans)
             # print('pred_spans: ',pred_spans)
             if len(pred_spans) > 0:
                 _score = 2 * len(pred_spans - pred_spans.intersection(parse_spans))/len(pred_spans) - 1.0
+                num_instance += 1
             else:
                 _score = 0.0
             # print('intersection: ',pred_spans.intersection(parse_spans))
@@ -446,7 +471,7 @@ class SrlSelfTraining(Model):
             scores[i] = _score
             # print(scores[i])
         
-        return scores
+        return scores, num_instance
             
 
 

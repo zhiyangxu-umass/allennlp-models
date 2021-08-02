@@ -6,11 +6,6 @@ local bert_model = "bert-base-uncased";
       "bert_model_name": bert_model,
     },
 
-    "validation_dataset_reader": {
-      "type": "srl",
-      "bert_model_name": bert_model,
-    },
-
     "data_loader": {
       "batch_sampler": {
         "type": "bucket",
@@ -20,7 +15,7 @@ local bert_model = "bert-base-uncased";
 
     "train_data_path": "dataset/train.10.pt",
     "aux_data_path": "dataset/train.aux.pt",
-    "validation_data_path": "/mnt/nfs/scratch1/zhiyangxu/jay-yoon/scaffolding/dataset/conll-formatted-ontonotes-5.0-12/conll-formatted-ontonotes-5.0/data/development",
+    "validation_data_path": "dataset/dev.all.pt",
 
     "model": {
         "type": "srl_self_training",
@@ -32,7 +27,7 @@ local bert_model = "bert-base-uncased";
         "type": "self_training",
         "optimizer": {
             "type": "huggingface_adamw",
-            "lr": 5e-4,
+            "lr": 5e-5,
             "correct_bias": false,
             "weight_decay": 0.01,
             "parameter_groups": [
@@ -49,9 +44,9 @@ local bert_model = "bert-base-uncased";
         "grad_norm": 1.0,
         "num_epochs": 10,
         "validation_metric": "+f1-measure-overall",
-        "mix_ratio": 1.0,
+        "mix_ratio": 5.0,
         "warm_up_epoch": 0,
-        "weighted_self_training": false,
-        "no_gold": true
+        "weighted_self_training": true,
+        "no_gold": false
     },
 }
