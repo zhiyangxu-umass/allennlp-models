@@ -13,8 +13,8 @@ local bert_model = "bert-base-uncased";
       }
     },
 
-    "train_data_path": "dataset/train.10.pt",
-    "aux_data_path": "dataset/train.aux-10.pt",
+    "train_data_path": "dataset/train.3.pt",
+    "aux_data_path": "dataset/train.all.filter.pt",
     "validation_data_path": "dataset/dev.all.pt",
 
     "model": {
@@ -26,18 +26,10 @@ local bert_model = "bert-base-uncased";
     "trainer": {
         "type": "self_training",
         "optimizer": {
-            "type": "huggingface_adamw",
-            "lr": 5e-5,
-            "correct_bias": false,
-            "weight_decay": 0.01,
-            "parameter_groups": [
-              [["bias", "LayerNorm.bias", "LayerNorm.weight", "layer_norm.weight"], {"weight_decay": 0.0}],
-            ],
+            "type": "sgd",
+            "lr": 0.01,
         },
-
-        "learning_rate_scheduler": {
-            "type": "slanted_triangular",
-        },
+        
         "checkpointer": {
             "keep_most_recent_by_count": 2,
         },
@@ -45,7 +37,7 @@ local bert_model = "bert-base-uncased";
         "num_epochs": 40,
         "patience": 15,
         "validation_metric": "+f1-measure-overall",
-        "mix_ratio": 0.1,
+        "mix_ratio": 1.0,
         "warm_up_epoch": -1,
         "weighted_self_training": true,
         "no_gold": false

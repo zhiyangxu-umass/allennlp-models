@@ -6,3 +6,4 @@ from allennlp_models.structured_prediction.models.graph_parser import GraphParse
 from allennlp_models.structured_prediction.models.srl import SemanticRoleLabeler
 from allennlp_models.structured_prediction.models.srl_bert import SrlBert
 from allennlp_models.structured_prediction.models.srl_self_training import SrlSelfTraining
+from allennlp_models.structured_prediction.models.srl_self_training_baseline import SrlSelfTrainingBaseline

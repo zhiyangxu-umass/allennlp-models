@@ -114,8 +114,8 @@ def _tree_to_spans(tree):
     return spans
 
 
-@DatasetReader.register("srl_self_training")
-class SrlSelfTrainingReader(DatasetReader):
+@DatasetReader.register("srl_self_training_frame")
+class SrlSelfTrainingFrameReader(DatasetReader):
     """
     This DatasetReader is designed to read in the English OntoNotes v5.0 data
     for semantic role labelling. It returns a dataset of instances with the
@@ -238,22 +238,21 @@ class SrlSelfTrainingReader(DatasetReader):
             )
 
         instances = torch.load(file_path)
-        for inst in instances:
-            # tokens = [Token(t) for t in sentence.words]
-            # if not sentence.parse_tree is None:
-            #     parse_spans = _tree_to_spans(sentence.parse_tree)
-            # else:
-            #     parse_spans = None
-            # if not sentence.srl_frames:
-            #     # Sentence contains no predicates.
-            #     tags = ["O" for _ in tokens]
-            #     verb_label = [0 for _ in tokens]
-            #     yield self.text_to_instance(tokens, verb_label, tags, parse_spans)
-            # else:
-            #     for (_, tags) in sentence.srl_frames:
-            #         verb_indicator = [1 if label[-2:] == "-V" else 0 for label in tags]
-            #         yield self.text_to_instance(tokens, verb_indicator, tags, parse_spans)
-            yield self.text_to_instance(inst[0], inst[1], inst[2], inst[3])
+        for sentence in instances:
+            tokens = [Token(t) for t in sentence.words]
+            if not sentence.parse_tree is None:
+                parse_spans = _tree_to_spans(sentence.parse_tree)
+            else:
+                parse_spans = None
+            if not sentence.srl_frames:
+                # Sentence contains no predicates.
+                tags = ["O" for _ in tokens]
+                verb_label = [0 for _ in tokens]
+                yield self.text_to_instance(tokens, verb_label, tags, parse_spans)
+            else:
+                for (_, tags) in sentence.srl_frames:
+                    verb_indicator = [1 if label[-2:] == "-V" else 0 for label in tags]
+                    yield self.text_to_instance(tokens, verb_indicator, tags, parse_spans)
 
     @staticmethod
     def _ontonotes_subset(
